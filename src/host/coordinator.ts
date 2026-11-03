@@ -690,8 +690,8 @@ export class FusionCoordinator {
     const end = child.session.snapshotEvents().findLast(event => event.type === 'turn/end')
     if (!end || end.type !== 'turn/end' || end.data.reason.kind !== 'error') return
     const runtime = this.#runtime(binding.taskId), cleared = runtime.workerFailureClearedThrough
-    if (runtime.workerFailure?.childId === child.id && runtime.workerFailure.eventSeq === end.seq
-      || cleared?.childId === child.id && cleared.eventSeq >= end.seq) return
+    if (runtime.workerFailure?.childId === child.id && runtime.workerFailure?.eventSeq === end.seq
+      || cleared?.childId === child.id && (cleared?.eventSeq ?? -1) >= end.seq) return
     const error = end.data.reason.error
     // 429 alone also means transient concurrency/rate pressure. Only explicit
     // quota/billing exhaustion closes automatic continuation. Do not project raw
