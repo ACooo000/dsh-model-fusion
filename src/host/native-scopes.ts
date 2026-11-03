@@ -170,8 +170,11 @@ export class NativeFusionScopes {
       return { ...rest, provider: route.provider, model: route.model, maxTokens,
         ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }) }
     }, { prepend: true }))
-    entry.refreshTools()
+    // Register before the first refresh. refreshTools() snapshots presentAs/restrict,
+    // and a later assemble returns early when the allowlist key is unchanged, so a
+    // refresh that runs first omits Fusion tools for the opening turn.
     entry.dispose.push(...this.callbacks.installTools(scope, agent, entry.binding, role))
+    entry.refreshTools()
     entry.ready = true
   }
 

@@ -1,5 +1,4 @@
 import type { Context } from '@deepseek-ai/cordis';
-import { SessionId } from '@deepseek-ai/dsh-session';
 import { TaskId } from '../contracts.js';
 import { NativeRequestBudget } from '../host/native-budget.js';
 import type { NativeUsageRecord } from '../host/native-usage.js';
@@ -52,16 +51,16 @@ export declare function runNativeBenchmark(ctx: Context, options: NativeBenchmar
     startedAt: string;
     endedAt: string;
     wallSeconds: number;
-    parentSessionId: SessionId;
+    parentSessionId: Branded<"SessionId">;
     workerSessionId: string | null;
     taskId: TaskId;
     nativeRequests: number;
     protocolComplete: boolean;
     artifactPass: null;
-    workerParentSessionId: SessionId | null;
+    workerParentSessionId: any;
     workerSessions: {
-        sessionId: SessionId;
-        parentSessionId: SessionId | undefined;
+        sessionId: Branded<"SessionId">;
+        parentSessionId: any;
         eventsFile: string;
     }[];
 }>;
