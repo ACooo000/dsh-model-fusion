@@ -13,6 +13,36 @@ function formatChanged(paths: readonly string[]): string {
   return `${shown.join(', ')}${paths.length > shown.length ? ` (+${paths.length - shown.length} more)` : ''}`
 }
 
+const EMPTY_SCOPE_NOTE = 'Host verified: the workspace listing contains no files.'
+
+/**
+ * The model's sentence is required, and it is never proof. Callers must already
+ * have seen an empty host listing. A search miss inside a workspace that still
+ * has files does not match these phrases into an exception.
+ */
+function statesEmptyScope(summary: string): boolean {
+  const text = summary.toLowerCase()
+  return text.includes('no files')
+    || text.includes('zero files')
+    || text.includes('0 files')
+    || text.includes('scope is empty')
+    || text.includes('empty scope')
+    || text.includes('directory is empty')
+    || text.includes('folder is empty')
+    || text.includes('workspace is empty')
+    || summary.includes('没有文件')
+    || summary.includes('无文件')
+    || summary.includes('空目录')
+    || summary.includes('范围为空')
+    || summary.includes('目录为空')
+}
+
+/** Both listings are the host's. A failed live snapshot is not an empty scope. */
+function hostVerifiedEmptyScope(baseline: WorkspaceSnapshot, current: WorkspaceSnapshot | undefined): boolean {
+  return current !== undefined && baseline.root === current.root
+    && baseline.entries.length === 0 && current.entries.length === 0
+}
+
 /** Read cited ranges against the frozen baseline. Nothing is stored until every range is valid. */
 function prepareSources(baseline: WorkspaceSnapshot, sources: readonly ExplorationSource[]): PreparedSource[] {
   if (sources.length > 12) throw new Error('A completed exploration requires 1–12 source ranges')
@@ -56,9 +86,15 @@ function storeSources(store: SqliteFusionStore, taskId: WorkOrder['taskId'], pre
  * not against every other file in a non-git root. blocked and needs-decision reports
  * are always recorded, with drift or a failed whole-tree snapshot named, and are not acceptance.
  *
+ * A completed report normally cites 1–12 ranges. Zero ranges are accepted only when
+ * the frozen baseline and the listing taken at submit time both contain no entries,
+ * and the summary states that the scope is empty. The sentence is not proof: a
+ * non-empty listing still requires 1–12 ranges, including when a search matched nothing.
+ *
  * `current` is omitted when snapshotting the tree threw. The failure is stored on a
  * non-completed report. A completed report ignores that unrelated failure and still
- * stands or falls on the cited files alone.
+ * stands or falls on the cited files alone. Zero ranges cannot use that path, because
+ * there is no cited file to check and the live listing was not confirmed empty.
  */
 export function captureExploration(store: SqliteFusionStore, order: WorkOrder, baseline: WorkspaceSnapshot, current: WorkspaceSnapshot | undefined,
   submitted: Pick<ExplorationReport, 'summary' | 'status' | 'unresolved'>, sources: readonly ExplorationSource[], snapshotFailure?: string): ExplorationReport {
@@ -85,7 +121,16 @@ export function captureExploration(store: SqliteFusionStore, order: WorkOrder, b
       status: submitted.status, unresolved: [...submitted.unresolved, ...problems], snapshot: baseline.id,
       sources: storeSources(store, order.taskId, prepared) }
   }
-  if (!sources.length || sources.length > 12) throw new Error('A completed exploration requires 1–12 source ranges')
+  if (sources.length > 12) throw new Error('A completed exploration requires 1–12 source ranges')
+  if (!sources.length) {
+    if (!hostVerifiedEmptyScope(baseline, current)) throw new Error('A completed exploration requires 1–12 source ranges')
+    if (!statesEmptyScope(submitted.summary)) {
+      throw new Error('The host listing contains no files. A completed report may omit source ranges only when the summary states that the scope is empty.')
+    }
+    const summary = submitted.summary.includes(EMPTY_SCOPE_NOTE) ? submitted.summary : `${submitted.summary}\n\n${EMPTY_SCOPE_NOTE}`
+    return { schemaVersion: 1, workOrderId: order.id, revision: order.revision, ...submitted, summary,
+      snapshot: baseline.id, sources: [] }
+  }
   if (drifted && current) {
     const cited = new Set(sources.map(source => source.path))
     const citedChanged = changed.filter(path => cited.has(path))

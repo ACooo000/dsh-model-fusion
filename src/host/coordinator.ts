@@ -756,7 +756,7 @@ export class FusionCoordinator {
     if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !WORKER_FUSION_TOOLS.has(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'
     if (role === 'worker' && state.currentWorkOrder?.mode === 'explore'
       && !isRead(exec) && exec.name !== 'fusion_submit_result') {
-      return 'Exploration is read-only: use file search/read tools and fusion_submit_result with source ranges; no shell, edits or run_code'
+      return 'Exploration is read-only: use file search/read tools and fusion_submit_result with 1–12 source ranges (omit them only when the host listing has no files and you state that the scope is empty); no shell, edits or run_code'
     }
     // The Sidekick's ceiling also holds at execution. A tool another plugin registers on the
     // Worker itself survives both the 0.2.0 start-time toolFilter and the 0.2.1 scope restriction.
@@ -1207,7 +1207,7 @@ export class FusionCoordinator {
       .map(check => `${check.definition.id}: ${JSON.stringify(check.plan.allowedFailures)}`)
     const knownText = known.length ? `\n\nPre-existing failures the Host observed on the untouched workspace before you started (not part of this task; these checks pass while only these fail, so do not change unrelated code to fix them):\n${known.join('\n')}` : ''
     const brief = `${request}${hard}Current stage brief (Lead-authored; later feedback may advance or replace this stage without changing the frozen work order):\n${args.brief}\n\nFrozen work order (goal and constraints apply throughout this work order, across all implementation stages):\n${JSON.stringify(shownOrder)}\n\n${mode === 'explore'
-      ? 'Read-only exploration: return findings and source ranges through fusion_submit_result. Do not implement, run commands, or claim task completion.'
+      ? 'Read-only exploration: return findings through fusion_submit_result. A completed report cites 1–12 file ranges. Omit ranges only when the listing finds no files and the summary states that the scope is empty; the host accepts that only when its own listing is also empty. A search that matches nothing in a workspace that still has files does not qualify. Do not implement, run commands, or claim task completion.'
       : `Acceptance commands:\n${JSON.stringify(args.checks)}${knownText}`}`
     const payload = this.store.putArtifact(binding.taskId, Buffer.from(brief), 'text/plain')
     const prepared = this.state(binding.taskId)
@@ -1745,10 +1745,10 @@ export class FusionCoordinator {
       } }))]
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_submit_result', description: role === 'lead'
       ? 'Lead use only after fusion_takeover: submit your own correction so the frozen checks run again. To judge a Sidekick report, use fusion_review_result instead.'
-      : 'Submit the current work-order report and conclude this Worker turn. Read-only exploration requires source ranges; implementation retains frozen checks and Lead review.',
-        parameters: { summary: { type: 'string', description: 'Changes and findings; put nonblocking observations here.', required: true }, status: { type: 'string', enum: ['completed', 'blocked', 'needs-decision'], required: true },
+      : 'Submit the current work-order report and conclude this Worker turn. Read-only exploration requires 1–12 source ranges, unless the host listing of the workspace contains no files and the summary states that the scope is empty. Implementation retains frozen checks and Lead review.',
+        parameters: { summary: { type: 'string', description: 'Changes and findings; put nonblocking observations here. For an empty scope, state that the scope is empty (for example "the scope is empty" or "没有文件").', required: true }, status: { type: 'string', enum: ['completed', 'blocked', 'needs-decision'], required: true },
           unresolved: { ...stringList, description: 'Remaining requirement failures, blocking risks or decisions. Every item prevents final acceptance. Nonblocking observations belong in summary; never omit an actual unresolved requirement.' },
-          sources: { type: 'array', description: 'Required for completed exploration: 1–12 workspace-relative file ranges, each at most 80 lines. Host captures exact text; no invented snippets.',
+          sources: { type: 'array', description: 'Required for a completed exploration when the workspace listing contains files: 1–12 workspace-relative file ranges, each at most 80 lines. Host captures exact text; no invented snippets. Omit sources only when that listing contains no files and the summary states that the scope is empty. A search miss inside a non-empty workspace does not qualify.',
             items: { type: 'object', additionalProperties: false, properties: {
               path: { type: 'string', required: true }, startLine: { type: 'integer', required: true }, endLine: { type: 'integer', required: true },
             } } },

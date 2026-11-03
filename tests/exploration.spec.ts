@@ -80,6 +80,79 @@ describe('source-backed exploration evidence', () => {
     expect(report.unresolved.join('\n')).toContain('changed during capture')
     expect(report.sources).toEqual([])
   })
+  it('accepts one cited range on a non-empty workspace', () => {
+    const { store, snapshot, work, submitted } = fixture()
+    const report = captureExploration(store, work, snapshot, snapshot, submitted, [{ path: 'a.ts', startLine: 1, endLine: 2 }])
+    expect(report.status).toBe('completed')
+    expect(report.sources).toHaveLength(1)
+  })
+
+  it('rejects 13 source ranges', () => {
+    const { store, snapshot, work, submitted } = fixture()
+    const sources = Array.from({ length: 13 }, () => ({ path: 'a.ts', startLine: 1, endLine: 2 }))
+    expect(() => captureExploration(store, work, snapshot, snapshot, submitted, sources)).toThrow('A completed exploration requires 1–12 source ranges')
+    expect(store.artifacts(TASK)).toEqual([])
+  })
+
+  it('rejects zero ranges on a non-empty workspace even when the summary claims the scope is empty', () => {
+    const { store, snapshot, work } = fixture()
+    const claimed = { status: 'completed' as const, summary: 'The scope is empty and has no files.', unresolved: [] }
+    expect(() => captureExploration(store, work, snapshot, snapshot, claimed, [])).toThrow('A completed exploration requires 1–12 source ranges')
+    expect(store.artifacts(TASK)).toEqual([])
+  })
+
+  it('accepts a completed report with zero ranges when the host listing is empty and the summary says so', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fusion-exploration-empty-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const store = new SqliteFusionStore(':memory:')
+    cleanup.push(() => store.close())
+    store.create(created())
+    const snapshot = snapshotWorkspace(root)
+    expect(snapshot.entries).toEqual([])
+    const work = { ...order(), mode: 'explore' as const, baseSnapshot: snapshot.id, allowedPaths: [], acceptance: [] }
+    const submitted = { status: 'completed' as const, summary: 'The scope is empty. The directory has no files.', unresolved: [] as string[] }
+    const report = captureExploration(store, work, snapshot, snapshot, submitted, [])
+    expect(report.status).toBe('completed')
+    expect(report.sources).toEqual([])
+    expect(report.snapshot).toBe(snapshot.id)
+    expect(report.summary).toContain('no files')
+    expect(report.summary).toContain('Host verified: the workspace listing contains no files.')
+    const stated = { status: 'completed' as const, summary: '调查范围没有文件。', unresolved: [] as string[] }
+    const chinese = captureExploration(store, work, snapshot, snapshot, stated, [])
+    expect(chinese.status).toBe('completed')
+    expect(chinese.sources).toEqual([])
+  })
+
+  it('rejects zero ranges on an empty listing when the summary does not state that the scope is empty', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fusion-exploration-empty-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const store = new SqliteFusionStore(':memory:')
+    cleanup.push(() => store.close())
+    store.create(created())
+    const snapshot = snapshotWorkspace(root)
+    const work = { ...order(), mode: 'explore' as const, baseSnapshot: snapshot.id, allowedPaths: [], acceptance: [] }
+    const submitted = { status: 'completed' as const, summary: 'Finished the listing.', unresolved: [] }
+    expect(() => captureExploration(store, work, snapshot, snapshot, submitted, [])).toThrow('summary states that the scope is empty')
+    expect(store.artifacts(TASK)).toEqual([])
+  })
+
+  it('rejects zero ranges when the live listing could not be taken or is no longer empty', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fusion-exploration-empty-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const store = new SqliteFusionStore(':memory:')
+    cleanup.push(() => store.close())
+    store.create(created())
+    const snapshot = snapshotWorkspace(root)
+    const work = { ...order(), mode: 'explore' as const, baseSnapshot: snapshot.id, allowedPaths: [], acceptance: [] }
+    const submitted = { status: 'completed' as const, summary: 'The scope is empty and has no files.', unresolved: [] }
+    expect(() => captureExploration(store, work, snapshot, undefined, submitted, [], 'Unsupported source file type: unrelated.pipe')).toThrow('A completed exploration requires 1–12 source ranges')
+    writeFileSync(join(root, 'later.ts'), 'export const n = 1\n')
+    const current = snapshotWorkspace(root)
+    expect(current.entries.length).toBeGreaterThan(0)
+    expect(() => captureExploration(store, work, snapshot, current, submitted, [])).toThrow('A completed exploration requires 1–12 source ranges')
+    expect(store.artifacts(TASK)).toEqual([])
+  })
+
   it('records a planning result with captured bytes but cannot complete or accept implementation', () => {
     const { store, snapshot, work, submitted } = fixture()
     const report = captureExploration(store, work, snapshot, snapshot, submitted, [{ path: 'a.ts', startLine: 1, endLine: 2 }])
