@@ -62,7 +62,7 @@ export class NativeContextGuard {
     const text = (value: string) => meter.estimateMessage(createUserMessage({ content: [{ type: 'text', text: value }],
       source: { kind: 'plugin:dsh-model-fusion' } }))
     const fixed = (system ? text(system) : 0) + (tools?.length ? text(JSON.stringify(tools)) : 0)
-    const actual = messages.reduce((total, message) => total + meter.estimateMessage(message.id ? message : createUserMessage({ content: message.content, source: { kind: 'plugin:dsh-model-fusion' } })), 0) + fixed
+    const actual = messages.reduce((total, message) => total + meter.estimateMessage(message.role !== 'user' || message.id !== undefined ? (message as Message) : createUserMessage({ content: message.content, source: { kind: 'plugin:dsh-model-fusion' } })), 0) + fixed
     const pinned = messages.flatMap(message => message.source?.kind === 'plugin:dsh-model-fusion'
       && message.source.form === 'snapshot' ? message.source.sections.filter(section => section.name === FUSION_TASK_CONTEXT) : []).at(-1)
     // A summary cannot shrink the required current task snapshot, system prompt

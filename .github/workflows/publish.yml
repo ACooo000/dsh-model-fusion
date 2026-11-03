@@ -70,7 +70,7 @@ jobs:
           mkdir -p "$DSHX_HARNESS/node_modules"
           ln -s "$RUNNER_TEMP/tsdown/node_modules/tsdown" "$DSHX_HARNESS/node_modules/tsdown"
 
-      - run: pnpm install --frozen-lockfile --config.auto-install-peers=false --config.strict-dep-builds=false
+      - run: pnpm install --frozen-lockfile --config.auto-install-peers=false --config.strict-dep-builds=false --config.minimum-release-age=0
       - run: pnpm run build
       - run: pnpm test
 
