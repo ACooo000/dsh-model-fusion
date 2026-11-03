@@ -4269,6 +4269,21 @@ describe('issue 20 premature completion and bare Continue', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', intent: 'DIRECT', verification: 'unverified' })
   })
 
+  it.each([
+    ['What does "implement" mean? Answer in one sentence.', 'It means to put a plan into practice.'],
+    ['What is a software patch? Answer in one sentence.', 'A patch is a set of changes applied to software.'],
+    ['What does implement mean in TypeScript?', 'It means to write the body of a declared function or interface.'],
+    ['软件补丁是什么？', '软件补丁是一组应用到程序上的改动。'],
+  ])('completes a definitional question that only mentions implementation words: %s', async (prompt, reply) => {
+    const { parent, coordinator, store, taskId } = await setup([textResponse(reply)], undefined, {
+      modelLike: true, enforcedWorkflow: 'enforced-v3', noCwd: true,
+    })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: prompt }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', intent: 'DIRECT', verification: 'unverified', control: { mode: 'completed' } })
+    expect(store.listDocumentIds('child:')).toEqual([])
+  })
+
   it('does not complete a planning-only reply to an implementation request', async () => {
     const { parent, coordinator, store, taskId, workspace } = await setup([
       textResponse('I will inspect calc.py and delegate the fix to Sidekick.'),
