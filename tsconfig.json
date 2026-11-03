@@ -6,6 +6,7 @@
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
+    "preserveSymlinks": true,
     "noEmit": true,
     "rootDir": ".",
     "types": ["node"]

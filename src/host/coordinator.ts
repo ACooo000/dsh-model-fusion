@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-compaction'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { NativeWorkerNotices } from './native-worker-notices.js'
