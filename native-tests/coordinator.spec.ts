@@ -4182,3 +4182,141 @@ describe.skipIf(process.platform === 'win32')('exploration reports when a fresh 
     expect(state.exploration?.status).not.toBe('completed')
   })
 })
+
+describe('issue 19 empty-scope exceptions', () => {
+  const empty = () => toolCallResponse('empty-report', 'fusion_submit_result', {
+    status: 'completed', summary: 'The scope is empty and has no files.', unresolved: [], sources: [],
+  })
+
+  it('completes a directory that has no entries on disk', async () => {
+    const { parent, coordinator, taskId, workspace } = await setup([
+      explore(), toolCallResponse('finish-empty', 'fusion_finish_direct', {}), textResponse('Empty directory.'),
+    ], [empty()])
+    rmSync(join(workspace, 'calc.py'))
+    rmSync(join(workspace, 'test_calc.py'))
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'List the directory.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({
+      phase: 'COMPLETED', control: { mode: 'completed' }, verification: 'unverified', exploration: { status: 'completed', sources: [] },
+    })
+  })
+
+  it('does not accept an empty-scope report while gitignored source files exist', async () => {
+    const { parent, ctx, coordinator, taskId, workspace } = await setup([
+      explore(), toolCallResponse('finish-empty', 'fusion_finish_direct', {}), textResponse('Empty directory.'),
+    ], [empty(), textResponse('The directory is not empty.')])
+    const workerToolResults: string[] = []
+    ctx.on('session/event', (session: { header: { parentSession?: string } }, event: { type: string }) => {
+      if (event.type === 'tool/result' && session.header.parentSession) workerToolResults.push(JSON.stringify(event))
+    })
+    execFileSync('git', ['init', '-q', workspace])
+    writeFileSync(join(workspace, '.git', 'info', 'exclude'), '*.py\n')
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('def add')
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'List the files in the directory.' }] }))
+    await parent.whenIdle()
+    const observed = JSON.stringify(toolResults(parent)) + workerToolResults.join('\n')
+    expect(coordinator.state(taskId).control.mode, observed).not.toBe('completed')
+    expect(observed).toContain('1–12')
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a - b')
+  })
+
+  it('does not complete an empty-scope answer if a file appears before the report is collected', async () => {
+    let workspace = ''
+    const fixture = await setup([
+      explore(), textResponse('The empty report could not be collected.'),
+    ], [empty()])
+    workspace = fixture.workspace
+    rmSync(join(workspace, 'calc.py'))
+    rmSync(join(workspace, 'test_calc.py'))
+    fixture.ctx.on('session/event', (session: { header: { parentSession?: string } }, event: { type: string }) => {
+      if (event.type === 'tool/result' && session.header.parentSession) writeFileSync(join(workspace, 'appeared.py'), 'print("now nonempty")\n')
+    })
+    fixture.parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'List the directory.' }] }))
+    await fixture.parent.whenIdle()
+    expect(fixture.coordinator.state(fixture.taskId).control.mode, JSON.stringify(toolResults(fixture.parent))).not.toBe('completed')
+    expect(JSON.stringify(toolResults(fixture.parent))).toContain('1–12')
+    expect(fixture.coordinator.state(fixture.taskId).exploration?.status).not.toBe('completed')
+  })
+
+  it('does not complete an empty-scope answer if a file appears before fusion_finish_direct', async () => {
+    const { parent, coordinator, adapter, taskId, workspace } = await setup([
+      explore(), textResponse('Directory was empty.'),
+      toolCallResponse('finish-empty', 'fusion_finish_direct', {}), textResponse('Done'),
+    ], [empty()])
+    const release = holdLeadForFollowup(adapter, 2)
+    rmSync(join(workspace, 'calc.py'))
+    rmSync(join(workspace, 'test_calc.py'))
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'List the directory.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId).exploration).toMatchObject({ status: 'completed', sources: [] })
+    expect(coordinator.state(taskId).control.mode).not.toBe('completed')
+    writeFileSync(join(workspace, 'appeared.py'), 'print("now nonempty")\n')
+    release()
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Finish the directory answer.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId).control.mode, JSON.stringify(toolResults(parent))).not.toBe('completed')
+    expect(JSON.stringify(toolResults(parent))).toContain('1–12')
+  })
+})
+
+describe('issue 20 premature completion and bare Continue', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, files: true, sandbox: true }
+
+  it('keeps a conversational answer completed', async () => {
+    const { parent, coordinator, taskId } = await setup([textResponse('Hello.')], undefined, options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Hello.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', intent: 'DIRECT', verification: 'unverified' })
+  })
+
+  it('does not complete a planning-only reply to an implementation request', async () => {
+    const { parent, coordinator, store, taskId, workspace } = await setup([
+      textResponse('I will inspect calc.py and delegate the fix to Sidekick.'),
+      textResponse('I will continue and delegate the implementation.'),
+    ], undefined, options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition in calc.py and run test_calc.py. Do not stop after planning.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+    expect(coordinator.state(taskId).intent).not.toBe('DIRECT')
+    expect(store.listDocumentIds('child:')).toEqual([])
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toBe('def add(a, b):\n    return a - b\n')
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.bindings.read(parent.id)!.binding.taskId).toBe(taskId)
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a - b')
+  })
+
+  it('keeps the original requirement quotable after a bare Continue', async () => {
+    const { parent, coordinator, taskId, workspace } = await setup([
+      delegateV3(), acceptV3(), textResponse('Verified.'),
+      delegateV3(), acceptV3(), textResponse('Continued.'),
+    ], [edit(), report(), edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition in calc.py.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue.' }] }))
+    await parent.whenIdle()
+    const second = coordinator.bindings.read(parent.id)!.binding.taskId
+    expect(second).not.toBe(taskId)
+    expect(JSON.stringify(toolResults(parent))).not.toContain('requirements must be exact quotes')
+    expect(coordinator.state(second), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a + b')
+  })
+
+  it('does not carry an earlier instruction into a follow-up that is not a bare continuation', async () => {
+    const { parent, coordinator, taskId } = await setup([
+      delegateV3(), acceptV3(), textResponse('Verified.'),
+      delegateV3(), textResponse('The quote was rejected.'),
+    ], [edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition in calc.py.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Summarize the weather today.' }] }))
+    await parent.whenIdle()
+    const second = coordinator.bindings.read(parent.id)!.binding.taskId
+    expect(second).not.toBe(taskId)
+    expect(JSON.stringify(toolResults(parent))).toContain('requirements must be exact quotes')
+    expect(JSON.stringify(toolResults(parent))).toContain('addition')
+  })
+})

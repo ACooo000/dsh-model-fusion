@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync } from 'node:fs'
 import type { ExplorationReport, ExplorationSource, WorkOrder } from '../contracts.js'
 import { sha256Hex } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
@@ -37,10 +37,21 @@ function statesEmptyScope(summary: string): boolean {
     || summary.includes('目录为空')
 }
 
-/** Both listings are the host's. A failed live snapshot is not an empty scope. */
+/**
+ * The filtered manifest is not proof of emptiness. `readdir` omits `.` and `..`
+ * and nothing else: a hidden file, a gitignored file, `.git`, or an excluded
+ * directory such as `node_modules` is a real entry. A listing failure is not emptiness.
+ */
+export function scopeDirectoryEmpty(root: string): boolean {
+  try { return readdirSync(root).length === 0 }
+  catch { return false }
+}
+
+/** Both listings are the host's, and the directory itself has no entries. A failed live snapshot is not an empty scope. */
 function hostVerifiedEmptyScope(baseline: WorkspaceSnapshot, current: WorkspaceSnapshot | undefined): boolean {
   return current !== undefined && baseline.root === current.root
     && baseline.entries.length === 0 && current.entries.length === 0
+    && scopeDirectoryEmpty(current.root)
 }
 
 /** Read cited ranges against the frozen baseline. Nothing is stored until every range is valid. */
@@ -87,9 +98,11 @@ function storeSources(store: SqliteFusionStore, taskId: WorkOrder['taskId'], pre
  * are always recorded, with drift or a failed whole-tree snapshot named, and are not acceptance.
  *
  * A completed report normally cites 1–12 ranges. Zero ranges are accepted only when
- * the frozen baseline and the listing taken at submit time both contain no entries,
- * and the summary states that the scope is empty. The sentence is not proof: a
- * non-empty listing still requires 1–12 ranges, including when a search matched nothing.
+ * the frozen baseline and the listing taken at submit time both contain no manifest
+ * entries, the directory itself has no entries on disk, and the summary states that
+ * the scope is empty. A filtered manifest is not that check: gitignored files, hidden
+ * files and excluded directories still count. The sentence is not proof. A non-empty
+ * directory still requires 1–12 ranges, including when a search matched nothing.
  *
  * `current` is omitted when snapshotting the tree threw. The failure is stored on a
  * non-completed report. A completed report ignores that unrelated failure and still

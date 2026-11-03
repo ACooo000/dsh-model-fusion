@@ -44,7 +44,7 @@ import type { KeepaliveClock } from './native-keepalive.js'
 import { hasStartActivation } from './subagent-seam.js'
 import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
-import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
+import { captureExploration, citedEvidenceChanged, scopeDirectoryEmpty } from './native-exploration.js'
 import { workspaceWriterDenial } from './workspace-guard.js'
 import { absentWorkerOutcome, workerStopExplanation } from './worker-terminal.js'
 import { resolveModelOutputLimits } from './model-output.js'
@@ -174,6 +174,28 @@ interface DelegateInput {
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
 export const normalizeQuote = (text: string) => text.replace(/\s+/g, ' ').trim()
 
+/**
+ * A follow-up that adds no new instruction. Exact quotes from the task it continues
+ * stay valid; a message that adds its own words starts a fresh quote boundary.
+ */
+const BARE_CONTINUATION = /^(?:please\s+)?(?:continue|go on|carry on|keep going|proceed|resume|cont|继续|接着做|接着来|接着|往下做|往下|请继续)[.!。！…]*$/i
+
+export function isBareContinuation(text: string): boolean {
+  return BARE_CONTINUATION.test(normalizeQuote(text))
+}
+
+/**
+ * enforced-v3: a bare no-tool turn must not close an implementation request, or a
+ * reply that only promises to inspect, delegate, or implement. A conversational
+ * answer such as "Hello." does not match either pattern.
+ */
+const IMPLEMENTATION_REQUEST = /(?:\b(?:fix|implement|refactor|patch|repair|correct)\b|\brun\b[\s\S]{0,48}\btests?\b|修复|实现|改正|重构|跑测试|运行测试|不要只(?:做)?计划|do not stop after planning)/i
+const PLANNING_REPLY = /(?:\b(?:i will|i'll|i'm going to|i am going to|let me)\b[\s\S]{0,180}\b(?:inspect|delegate|implement|fix|explore|correct|continue|look|check|hand(?:\s|-)?off)\b|我将|我会|让我(?:先)?|准备(?:去)?(?:检查|交给|委托)|交给\s*Sidekick)/i
+
+export function directTurnLeavesWorkOpen(userTexts: readonly string[], assistantText: string): boolean {
+  return userTexts.some(text => IMPLEMENTATION_REQUEST.test(text)) || PLANNING_REPLY.test(assistantText)
+}
+
 /** Literal code spans (`like this`) a requirement asks for; a candidate that omits them gets flagged. */
 export const literalSpans = (text: string) => [...new Set([...text.matchAll(/`([^`\n]{2,120})`/g)].map(match => match[1]!))]
 
@@ -261,7 +283,7 @@ export class FusionCoordinator {
         // Adopt the known completed child of pre-workerId bindings once.
         if (!binding.workerId && previous.acceptedChild) this.bindings.assignWorker(agent.id, binding.taskId, previous.acceptedChild)
         const nextTask = asTaskId(randomUUID())
-        this.#createTask(agent, nextTask, { profile: binding.profile, prompts: binding.prompts })
+        this.#createTask(agent, nextTask, { profile: binding.profile, prompts: binding.prompts }, this.#carriedContinuationSeq(agent, binding.taskId))
         return this.bindings.rollover(agent.id, binding.taskId, nextTask)
       },
       taskContext: (agent, binding, role) => binding.profile.interactionMode === 'model-like'
@@ -482,6 +504,8 @@ export class FusionCoordinator {
       if (state.currentWorkOrder || state.control.mode !== 'running' || this.modelControl.blocked(binding, 'lead')) return
       if (state.lease && binding.profile.interactionMode !== 'model-like') return
       if (this.effects.pending(binding.taskId).length) return
+      const agent = this.ctx.agents.get(NativeSessionId(session.id))
+      if (agent && roleSeparated(binding) && this.#directTurnLeavesWorkOpen(agent, binding.taskId)) return
       try {
         this.#release(binding.taskId)
         this.append(binding.taskId, 'intent/chosen', { intent: 'DIRECT' })
@@ -562,12 +586,45 @@ export class FusionCoordinator {
     this.scopes.install(agent, binding, 'lead')
   }
 
-  #createTask(agent: Agent, taskId: TaskId, resolved: ResolvedProfile): void {
+  #createTask(agent: Agent, taskId: TaskId, resolved: ResolvedProfile, firstSeq?: number): void {
     this.store.create({ schemaVersion: 1, id: randomUUID(), taskId, seq: 1, revision: 1,
       type: 'task/created', createdAt: new Date().toISOString(), causeId: 'model-selector',
       payload: { parent: SessionId(agent.id), selection: { kind: 'profile', profileId: resolved.profile.id } } })
     this.append(taskId, 'profile/frozen', { digest: resolved.profile.digest, profileId: resolved.profile.id, version: resolved.profile.version })
-    this.taskContext.begin(agent, taskId)
+    this.taskContext.begin(agent, taskId, firstSeq)
+  }
+
+  /**
+   * A bare "Continue" starts a new task after the previous one completed, but the
+   * user's original words are still the requirement source. Anything else keeps
+   * the new task's own boundary.
+   */
+  #carriedContinuationSeq(agent: Agent, previousTaskId: TaskId): number | undefined {
+    const pending = agent.inbox.nextTurn[0]
+    if (!pending || (pending.source && pending.source.kind !== 'user')) return undefined
+    const text = pending.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    if (!isBareContinuation(text)) return undefined
+    const origin = this.store.readDocument(`task-origin:${previousTaskId}`)?.value as { firstSeq?: unknown } | undefined
+    if (typeof origin?.firstSeq === 'number' && Number.isSafeInteger(origin.firstSeq) && origin.firstSeq >= 0 && origin.firstSeq <= agent.session.seq) {
+      return origin.firstSeq
+    }
+    return 0
+  }
+
+  /** User text since this task's origin, plus the Lead's latest reply. */
+  #directTurnLeavesWorkOpen(agent: Agent, taskId: TaskId): boolean {
+    const origin = this.store.readDocument(`task-origin:${taskId}`)?.value as { firstSeq?: unknown } | undefined
+    const firstSeq = typeof origin?.firstSeq === 'number' ? origin.firstSeq : 0
+    const userTexts = agent.session.snapshotEvents().flatMap(event => {
+      if (event.seq < firstSeq || event.type !== 'user/message') return []
+      if (event.data.source && event.data.source.kind !== 'user') return []
+      return event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+    })
+    const reply = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/message')
+    const assistantText = reply && reply.type === 'assistant/message'
+      ? reply.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      : ''
+    return directTurnLeavesWorkOpen(userTexts, assistantText)
   }
 
   async clear(agent: Agent): Promise<void> {
@@ -759,7 +816,7 @@ export class FusionCoordinator {
     if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !WORKER_FUSION_TOOLS.has(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'
     if (role === 'worker' && state.currentWorkOrder?.mode === 'explore'
       && !isRead(exec) && exec.name !== 'fusion_submit_result') {
-      return 'Exploration is read-only: use file search/read tools and fusion_submit_result with 1–12 source ranges (omit them only when the host listing has no files and you state that the scope is empty); no shell, edits or run_code'
+      return 'Exploration is read-only: use file search/read tools and fusion_submit_result with 1–12 source ranges (omit them only when the directory has no entries on disk and you state that the scope is empty); no shell, edits or run_code'
     }
     // The Sidekick's ceiling also holds at execution. A tool another plugin registers on the
     // Worker itself survives both the 0.2.0 start-time toolFilter and the 0.2.1 scope restriction.
@@ -1210,7 +1267,7 @@ export class FusionCoordinator {
       .map(check => `${check.definition.id}: ${JSON.stringify(check.plan.allowedFailures)}`)
     const knownText = known.length ? `\n\nPre-existing failures the Host observed on the untouched workspace before you started (not part of this task; these checks pass while only these fail, so do not change unrelated code to fix them):\n${known.join('\n')}` : ''
     const brief = `${request}${hard}Current stage brief (Lead-authored; later feedback may advance or replace this stage without changing the frozen work order):\n${args.brief}\n\nFrozen work order (goal and constraints apply throughout this work order, across all implementation stages):\n${JSON.stringify(shownOrder)}\n\n${mode === 'explore'
-      ? 'Read-only exploration: return findings through fusion_submit_result. A completed report cites 1–12 file ranges. Omit ranges only when the listing finds no files and the summary states that the scope is empty; the host accepts that only when its own listing is also empty. A search that matches nothing in a workspace that still has files does not qualify. Do not implement, run commands, or claim task completion.'
+      ? 'Read-only exploration: return findings through fusion_submit_result. A completed report cites 1–12 file ranges. Omit ranges only when the directory has no entries on disk and the summary states that the scope is empty; the host accepts that only when its own listing is also empty. Hidden, gitignored and excluded entries still count. A search that matches nothing in a workspace that still has files does not qualify. Do not implement, run commands, or claim task completion.'
       : `Acceptance commands:\n${JSON.stringify(args.checks)}${knownText}`}`
     const payload = this.store.putArtifact(binding.taskId, Buffer.from(brief), 'text/plain')
     const prepared = this.state(binding.taskId)
@@ -1469,6 +1526,9 @@ export class FusionCoordinator {
       if (report.status === 'completed') {
         const cited = citedEvidenceChanged(runtime.root, runtime.base, report)
         if (cited) throw new Error(`Cited exploration evidence changed: ${cited}. Frozen baseline ${order.baseSnapshot}. Submit blocked or needs-decision to record the drift.`)
+        if (!report.sources.length && !scopeDirectoryEmpty(runtime.root)) {
+          throw new Error('A completed exploration requires 1–12 source ranges')
+        }
       }
       this.store.transact(binding.taskId, state.seq, persisted => ({
         events: [{ schemaVersion: 1, id: randomUUID(), taskId: binding.taskId, seq: state.seq + 1,
@@ -1748,10 +1808,10 @@ export class FusionCoordinator {
       } }))]
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_submit_result', description: role === 'lead'
       ? 'Lead use only after fusion_takeover: submit your own correction so the frozen checks run again. To judge a Sidekick report, use fusion_review_result instead.'
-      : 'Submit the current work-order report and conclude this Worker turn. Read-only exploration requires 1–12 source ranges, unless the host listing of the workspace contains no files and the summary states that the scope is empty. Implementation retains frozen checks and Lead review.',
+      : 'Submit the current work-order report and conclude this Worker turn. Read-only exploration requires 1–12 source ranges, unless the directory has no entries on disk and the summary states that the scope is empty. Hidden, gitignored and excluded entries still count, and the host checks again when the Lead collects or finishes the report. Implementation retains frozen checks and Lead review.',
         parameters: { summary: { type: 'string', description: 'Changes and findings; put nonblocking observations here. For an empty scope, state that the scope is empty (for example "the scope is empty" or "没有文件").', required: true }, status: { type: 'string', enum: ['completed', 'blocked', 'needs-decision'], required: true },
           unresolved: { ...stringList, description: 'Remaining requirement failures, blocking risks or decisions. Every item prevents final acceptance. Nonblocking observations belong in summary; never omit an actual unresolved requirement.' },
-          sources: { type: 'array', description: 'Required for a completed exploration when the workspace listing contains files: 1–12 workspace-relative file ranges, each at most 80 lines. Host captures exact text; no invented snippets. Omit sources only when that listing contains no files and the summary states that the scope is empty. A search miss inside a non-empty workspace does not qualify.',
+          sources: { type: 'array', description: 'Required for a completed exploration when the directory contains any entry: 1–12 workspace-relative file ranges, each at most 80 lines. Host captures exact text; no invented snippets. Omit sources only when the directory itself has no entries and the summary states that the scope is empty. Hidden, gitignored and excluded entries still count. A search miss inside a non-empty workspace does not qualify.',
             items: { type: 'object', additionalProperties: false, properties: {
               path: { type: 'string', required: true }, startLine: { type: 'integer', required: true }, endLine: { type: 'integer', required: true },
             } } },
@@ -1844,6 +1904,9 @@ export class FusionCoordinator {
           if (state.lease) throw new Error('Read-only exploration still holds a write lease')
           const cited = citedEvidenceChanged(runtime.root, runtime.base, state.exploration!)
           if (cited) throw new Error(`Cited exploration evidence changed: ${cited}. Frozen baseline ${state.exploration!.snapshot}.`)
+          if (!state.exploration!.sources.length && !scopeDirectoryEmpty(runtime.root)) {
+            throw new Error('A completed exploration requires 1–12 source ranges')
+          }
           // The cited files decide a read-only answer. An unrelated FIFO or socket that breaks
           // the whole-tree snapshot falls back to the baseline those files were checked against.
           try { snapshot = snapshotWorkspace(runtime.root).id }

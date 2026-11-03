@@ -53,9 +53,12 @@ interface SavedProjection {
 export class NativeTaskContext {
   constructor(readonly store: SqliteFusionStore, readonly parent: (id: string) => Agent | undefined) {}
 
-  begin(agent: Agent, taskId: TaskId): void {
+  begin(agent: Agent, taskId: TaskId, firstSeq = agent.session.seq): void {
+    if (!Number.isSafeInteger(firstSeq) || firstSeq < 0 || firstSeq > agent.session.seq) {
+      throw new Error('Fusion task input boundary requires reconciliation')
+    }
     this.store.writeDocument(`task-origin:${taskId}`, 0,
-      { schemaVersion: 1, sessionId: agent.id, firstSeq: agent.session.seq } satisfies Origin)
+      { schemaVersion: 1, sessionId: agent.id, firstSeq } satisfies Origin)
   }
 
   /**

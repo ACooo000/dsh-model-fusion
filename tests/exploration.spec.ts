@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { captureExploration } from '../src/host/native-exploration.js'
+import { captureExploration, scopeDirectoryEmpty } from '../src/host/native-exploration.js'
 import { snapshotWorkspace } from '../src/host/workspace.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
 import { reduceAll } from '../src/task/reducer.js'
@@ -151,6 +151,60 @@ describe('source-backed exploration evidence', () => {
     expect(current.entries.length).toBeGreaterThan(0)
     expect(() => captureExploration(store, work, snapshot, current, submitted, [])).toThrow('A completed exploration requires 1–12 source ranges')
     expect(store.artifacts(TASK)).toEqual([])
+  })
+
+  it('rejects zero ranges when the filtered manifest is empty but the directory still has entries', () => {
+    const submitted = { status: 'completed' as const, summary: 'The scope is empty and has no files.', unresolved: [] as string[] }
+    const open = (root: string, manifestEmpty: boolean) => {
+      const store = new SqliteFusionStore(':memory:')
+      cleanup.push(() => store.close())
+      store.create(created())
+      const snapshot = snapshotWorkspace(root)
+      if (manifestEmpty) expect(snapshot.entries).toEqual([])
+      const work = { ...order(), mode: 'explore' as const, baseSnapshot: snapshot.id, allowedPaths: [], acceptance: [] }
+      expect(scopeDirectoryEmpty(snapshot.root)).toBe(false)
+      expect(() => captureExploration(store, work, snapshot, snapshot, submitted, [])).toThrow('A completed exploration requires 1–12 source ranges')
+      expect(store.artifacts(TASK)).toEqual([])
+    }
+    const hidden = mkdtempSync(join(tmpdir(), 'fusion-exploration-hidden-'))
+    cleanup.push(() => rmSync(hidden, { recursive: true, force: true }))
+    writeFileSync(join(hidden, '.hidden.ts'), 'export const a = 1\n')
+    open(hidden, false)
+
+    const ignored = mkdtempSync(join(tmpdir(), 'fusion-exploration-ignored-'))
+    cleanup.push(() => rmSync(ignored, { recursive: true, force: true }))
+    execFileSync('git', ['init', '-q', ignored])
+    writeFileSync(join(ignored, '.gitignore'), 'scope/**\n')
+    const scope = join(ignored, 'scope')
+    mkdirSync(scope)
+    writeFileSync(join(scope, 'secret.ts'), 'export const a = 1\n')
+    open(scope, true)
+
+    const excluded = mkdtempSync(join(tmpdir(), 'fusion-exploration-excluded-'))
+    cleanup.push(() => rmSync(excluded, { recursive: true, force: true }))
+    mkdirSync(join(excluded, 'node_modules'))
+    writeFileSync(join(excluded, 'node_modules', 'actual.js'), 'export const a = 1\n')
+    open(excluded, true)
+
+    const repo = mkdtempSync(join(tmpdir(), 'fusion-exploration-git-'))
+    cleanup.push(() => rmSync(repo, { recursive: true, force: true }))
+    execFileSync('git', ['init', '-q', repo])
+    open(repo, true)
+  })
+
+  it('rejects a stale empty manifest once a file exists on disk', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fusion-exploration-late-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const store = new SqliteFusionStore(':memory:')
+    cleanup.push(() => store.close())
+    store.create(created())
+    const snapshot = snapshotWorkspace(root)
+    const work = { ...order(), mode: 'explore' as const, baseSnapshot: snapshot.id, allowedPaths: [], acceptance: [] }
+    const submitted = { status: 'completed' as const, summary: 'The scope is empty and has no files.', unresolved: [] }
+    expect(captureExploration(store, work, snapshot, snapshot, submitted, []).sources).toEqual([])
+    writeFileSync(join(root, 'appeared.ts'), 'export const a = 1\n')
+    expect(scopeDirectoryEmpty(snapshot.root)).toBe(false)
+    expect(() => captureExploration(store, work, snapshot, snapshot, submitted, [])).toThrow('A completed exploration requires 1–12 source ranges')
   })
 
   it('records a planning result with captured bytes but cannot complete or accept implementation', () => {
