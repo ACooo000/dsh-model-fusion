@@ -187,32 +187,53 @@ export function isBareContinuation(text: string): boolean {
 /**
  * enforced-v3: a bare no-tool turn must not close a concrete workspace request,
  * or a reply that only promises to inspect, delegate, or implement. Asking what
- * a word means ("what is a patch", "what does implement mean", "是什么") is not
- * that request. A conversational answer such as "Hello." does not match either pattern.
+ * a word means ("what is a patch", "what does implement mean", "是什么", "如何实现")
+ * is not that request, and neither is an explanation that forbids edits.
+ * A definition clause does not waive a later command in the same sentence.
+ * A conversational answer such as "Hello." does not match either pattern.
  */
 const IMPLEMENTATION_REQUEST = /(?:\b(?:fix|implement|refactor|patch|repair|correct)\b|\brun\b[\s\S]{0,48}\btests?\b|修复|实现|改正|重构|跑测试|运行测试|不要只(?:做)?计划|do not stop after planning)/i
 const PLANNING_REPLY = /(?:\b(?:i will|i'll|i'm going to|i am going to|let me)\b[\s\S]{0,180}\b(?:inspect|delegate|implement|fix|explore|correct|continue|look|check|read|hand(?:\s|-)?off)\b|我将|我会|接下来我会|让我(?:先)?|我先(?:去)?(?:查看|看看|看一下|检查|阅读)(?!了)|准备(?:去)?(?:检查|查看|交给|委托)|交给\s*Sidekick)/i
-const DEFINITIONAL_QUESTION = /(?:\bwhat(?:'s|\s+is|\s+are)\b|\bwhat\s+does\b[\s\S]{0,240}\bmeans?\b|\bexplain\b|是什么|什么意思|什么是|怎么理解|是啥)/i
-const EN_COMMAND = String.raw`(?:fix|implement|refactor|repair|correct|change|edit|update|apply|write)\b`
-const ZH_COMMAND = String.raw`(?:修复|改正|重构)`
-/** An imperative to change the workspace. A mention inside "what does X mean" is not one. */
+const DEFINITIONAL_QUESTION = /(?:\bwhat(?:'s|\s+is|\s+are)\b|\bwhat\s+does\b[\s\S]{0,240}\bmeans?\b|\bexplain\b|\bhow\s+do\s+i\b|\bhow\s+does\b|\bwhy\s+(?:do|does|is|are|should)\b|是什么|什么意思|什么是|怎么理解|如何理解|是啥)/i
+const NON_MUTATION = /(?:\bwithout\s+changing\s+any\s+files\b|\bexplain\s+only\b|\bdo\s+not\s+edit\s+any\s+files\b|\bwithout\s+editing\s+files\b|\bwithout\s+executing\s+anything\b|\banswer\s+conceptually\b|只讲原理|不要修改文件|只解释概念|不改文件|不要实际执行命令)/i
+const EN_COMMAND = String.raw`(?:fix|implement|patch|refactor|repair|correct|change|edit|update|apply|write)\b`
+const ZH_COMMAND = String.raw`(?:修复|实现|改正|重构)`
+const ZH_COMMAND_LINK = String.raw`(?:然后|并且|并|以及|再|接着)`
+/** An imperative to change the workspace. A mention inside "what does X mean" or "如何运行测试" is not one. */
 const COMMAND_ACTION = new RegExp([
   String.raw`(?:^|[.!?。！？]\s*)(?:please\s+)?${EN_COMMAND}`,
   String.raw`(?:^|[.!?。！？]\s*)(?:请\s*)?${ZH_COMMAND}`,
   String.raw`\b(?:and then|then)\s+(?:please\s+)?${EN_COMMAND}`,
+  String.raw`\band\s+(?:please\s+)?${EN_COMMAND}`,
+  String.raw`,?\s*(?:and\s+)?then\s+(?:please\s+)?${EN_COMMAND}`,
   String.raw`(?:然后|并且)(?:请\s*)?${ZH_COMMAND}`,
-  String.raw`\brun\b[\s\S]{0,48}\btests?\b`,
-  String.raw`跑测试|运行测试`,
+  String.raw`(?:[，,]\s*)?(?:并|以及|再|接着)(?:请\s*)?${ZH_COMMAND}`,
+  String.raw`(?:^|[.!?。！？]\s*|\b(?:and|then)\s+)(?:please\s+)?run\b[\s\S]{0,48}\btests?\b`,
+  String.raw`(?:^|[.!?。！？]\s*|(?:[，,]\s*)?${ZH_COMMAND_LINK})(?:请\s*)?(?:跑测试|运行测试)`,
   String.raw`do not stop after planning`,
   String.raw`不要只(?:做)?计划`,
 ].join('|'), 'i')
 
-/** Drop the subject of a definition question so its words are not read as a command. */
+/**
+ * Drop a definitional or explanation-only clause. The subject of a prefix question
+ * ("什么是运行测试") follows the marker; the subject of a suffix question ("实现是什么")
+ * precedes it. A trailing imperative ("and fix", "，并实现") stays in place.
+ */
 function stripDefinitionSubject(sentence: string): string {
   return sentence
-    .replace(/\bwhat\s+does\b[\s\S]{0,240}?\bmeans?\b/i, ' ')
-    .replace(/\bwhat(?:'s|\s+is|\s+are)\b[\s\S]{0,240}?[?？]/i, ' ')
-    .replace(/[^。！？?!]*?(?:是什么|什么意思|什么是|怎么理解|是啥)/, ' ')
+    .replace(/\bwhat\s+does\b[\s\S]{0,240}?\bmeans?\b/gi, ' ')
+    .replace(/\bwhat(?:'s|\s+is|\s+are)\b[\s\S]{0,240}?[?？]/gi, ' ')
+    .replace(/\bexplain\s+what\b[^,.!?。！？]{0,240}?\b(?:is|means|does)\b/gi, ' ')
+    .replace(/请?解释(?:一下)?(?:什么是[^，,。！？?!]+|[^，,。！？?!]*?(?:是什么|什么意思))/g, ' ')
+    .replace(/(?:什么是|怎么理解|如何理解)[^，,。！？?!]*/g, ' ')
+    .replace(/[^，,。！？?!]*?(?:是什么|什么意思|是啥)/g, ' ')
+    .replace(/\b(?:please\s+)?explain\s+how\s+to\b(?:(?!\b(?:and|then)\s+)(?![，,]\s*(?:并|以及|再|接着|然后|并且))[\s\S]){0,240}/gi, ' ')
+    .replace(/\bhow\s+do\s+i\b(?:(?!\b(?:and|then)\s+)[^?？])*[?？]?/gi, ' ')
+    .replace(/\bhow\s+does\b(?:(?!\b(?:and|then)\s+)[^?？])*[?？]?/gi, ' ')
+    .replace(/\bwhy\s+(?:do|does|is|are|should)\b(?:(?!\b(?:and|then)\s+)[^?？])*[?？]?/gi, ' ')
+    .replace(/请?解释(?:一下)?如何(?:(?![，,]\s*(?:并|以及|再|接着|然后|并且))[^。！？?!])*/g, ' ')
+    .replace(/(?:^|[。！？?!]\s*)如何(?:(?![，,]\s*(?:并|以及|再|接着|然后|并且))[^，,。！？?!])*/g, ' ')
+    .replace(NON_MUTATION, ' ')
 }
 
 /** Sentence breaks. A dot followed by a letter, as in calc.py, stays inside the sentence. */
@@ -239,8 +260,9 @@ function concreteImplementationRequest(text: string): boolean {
   const normalized = normalizeQuote(text)
   if (!IMPLEMENTATION_REQUEST.test(normalized)) return false
   for (const sentence of sentencesOf(normalized)) {
-    if (COMMAND_ACTION.test(stripDefinitionSubject(sentence))) return true
-    if (!DEFINITIONAL_QUESTION.test(sentence) && IMPLEMENTATION_REQUEST.test(sentence)) return true
+    const stripped = stripDefinitionSubject(sentence)
+    if (COMMAND_ACTION.test(stripped)) return true
+    if (!DEFINITIONAL_QUESTION.test(sentence) && IMPLEMENTATION_REQUEST.test(stripped)) return true
   }
   return false
 }
